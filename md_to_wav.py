@@ -61,6 +61,7 @@ def text_to_chunks(text: str, max_chars: int = MAX_CHARS):
     return chunks
 
 MARKDOWN_PATTERNS = [
+    (re.compile(r'^\s*[-*_]{3,}\s*$', re.MULTILINE), ''),
     (re.compile(r'!\[.*?\]\(.*?\)'), ''),
     (re.compile(r'\[\^.*?\]'), ''),
     (re.compile(r'\[([^\]]*)\]\(.*?\)'), r'\1'),
@@ -74,7 +75,6 @@ MARKDOWN_PATTERNS = [
     (re.compile(r'^#{1,6}\s+', re.MULTILINE), ''),
     (re.compile(r'^[\s]*[-*+]\s+', re.MULTILINE), ''),
     (re.compile(r'^[\s]*\d+\.\s+', re.MULTILINE), ''),
-    (re.compile(r'^\s*[-*_]{3,}\s*$', re.MULTILINE), ''),
     (re.compile(r'<[^>]+>'), ''),
 ]
 
@@ -109,11 +109,14 @@ ABBREVIATIONS = [
 ]
 
 def normalize_text(text: str) -> str:
-    text = text.replace('\u2013', ', ')
-    text = text.replace('\u2014', ', ')
+    text = text.replace('\u2013', ',')
+    text = text.replace('\u2014', ',')
     text = text.replace('\u2026', '...')
     for pattern, replacement in ABBREVIATIONS:
         text = pattern.sub(replacement, text)
+    text = re.sub(r',\s*,', ',', text)
+    text = re.sub(r'\s+,', ',', text)
+    text = re.sub(r',\s+', ', ', text)
     text = re.sub(r' +', ' ', text)
     return text.strip()
 
