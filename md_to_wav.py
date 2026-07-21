@@ -11,6 +11,8 @@ torch.load = custom_torch_load
 from TTS.api import TTS
 import re
 from pydub import AudioSegment
+from pydub import effects
+from pysbd import Segmenter
 import tempfile
 
 
@@ -24,23 +26,15 @@ MODEL_NAME = "tts_models/multilingual/multi-dataset/xtts_v2"
 tts = TTS(MODEL_NAME)
 tts.to("cuda")
 
-MAX_CHARS = 230  # etwas unter 253 bleiben
+MAX_CHARS = 800
 
-sentence_end_re = re.compile(r'([.!?]+)["“”\']?\s+')
+SILENCE_BETWEEN_CHUNKS = 200  # ms pause between chunks
+SPEAKER_WAV = Path("data/christian-brueckner.wav") # Optional: Path to a speaker reference audio file
+
+_segmenter = Segmenter(language="de", clean=True)
 
 def split_into_sentences(text: str):
-    parts = []
-    start = 0
-    for match in sentence_end_re.finditer(text):
-        end = match.end()
-        sent = text[start:end].strip()
-        if sent:
-            parts.append(sent)
-        start = end
-    last = text[start:].strip()
-    if last:
-        parts.append(last)
-    return parts
+    return _segmenter.segment(text)
 
 def split_long_sentence(sent: str, max_chars: int = MAX_CHARS):
     if len(sent) <= max_chars:
@@ -66,7 +60,66 @@ def text_to_chunks(text: str, max_chars: int = MAX_CHARS):
         chunks.extend(split_long_sentence(sent, max_chars))
     return chunks
 
+MARKDOWN_PATTERNS = [
+    (re.compile(r'!\[.*?\]\(.*?\)'), ''),
+    (re.compile(r'\[\^.*?\]'), ''),
+    (re.compile(r'\[([^\]]*)\]\(.*?\)'), r'\1'),
+    (re.compile(r'```.+?```', re.DOTALL), ''),
+    (re.compile(r'`([^`]+)`'), r'\1'),
+    (re.compile(r'\*\*(.+?)\*\*'), r'\1'),
+    (re.compile(r'__(.+?)__'), r'\1'),
+    (re.compile(r'\*(.+?)\*'), r'\1'),
+    (re.compile(r'_(.+?)_'), r'\1'),
+    (re.compile(r'^>\s?', re.MULTILINE), ''),
+    (re.compile(r'^#{1,6}\s+', re.MULTILINE), ''),
+    (re.compile(r'^[\s]*[-*+]\s+', re.MULTILINE), ''),
+    (re.compile(r'^[\s]*\d+\.\s+', re.MULTILINE), ''),
+    (re.compile(r'^\s*[-*_]{3,}\s*$', re.MULTILINE), ''),
+    (re.compile(r'<[^>]+>'), ''),
+]
+
+def strip_markdown(text: str) -> str:
+    for pattern, replacement in MARKDOWN_PATTERNS:
+        text = pattern.sub(replacement, text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+ABBREVIATIONS = [
+    (re.compile(r'\bz\.\s*B\.'), 'zum Beispiel'),
+    (re.compile(r'\bbzw\.'), 'beziehungsweise'),
+    (re.compile(r'\bDr\.'), 'Doktor'),
+    (re.compile(r'\bProf\.'), 'Professor'),
+    (re.compile(r'\bca\.'), 'circa'),
+    (re.compile(r'\betc\.'), 'et cetera'),
+    (re.compile(r'\bd\.\s*h\.'), 'das heißt'),
+    (re.compile(r'\bu\.\s*a\.'), 'unter anderem'),
+    (re.compile(r'\bvgl\.'), 'vergleiche'),
+    (re.compile(r'\bggf\.'), 'gegebenenfalls'),
+    (re.compile(r'\bz\.\s*Z\.'), 'zur Zeit'),
+    (re.compile(r'\bs\.'), 'siehe'),
+    (re.compile(r'\bNr\.'), 'Nummer'),
+    (re.compile(r'\binkl\.'), 'inklusive'),
+    (re.compile(r'\bexkl\.'), 'exklusive'),
+    (re.compile(r'\bMio\.'), 'Millionen'),
+    (re.compile(r'\bMrd\.'), 'Milliarden'),
+    (re.compile(r'\bod\.'), 'oder'),
+    (re.compile(r'\bsog\.'), 'sogenannt'),
+    (re.compile(r'\busw\.'), 'und so weiter'),
+    (re.compile(r'\bz\.\s*T\.'), 'zum Teil'),
+]
+
+def normalize_text(text: str) -> str:
+    text = text.replace('\u2013', ', ')
+    text = text.replace('\u2014', ', ')
+    text = text.replace('\u2026', '...')
+    for pattern, replacement in ABBREVIATIONS:
+        text = pattern.sub(replacement, text)
+    text = re.sub(r' +', ' ', text)
+    return text.strip()
+
 def synthesize_chapter(content: str, out_path):
+    content = strip_markdown(content)
+    content = normalize_text(content)
     chunks = text_to_chunks(content, MAX_CHARS)
     combined = AudioSegment.silent(duration=0)
 
@@ -77,14 +130,17 @@ def synthesize_chapter(content: str, out_path):
         tts.tts_to_file(
             text=chunk,
             file_path=tmp_wav.name,
-            speaker_wav=None,
-            speaker="Daisy Studious",
+            speaker_wav=str(SPEAKER_WAV) if SPEAKER_WAV else None,
+            # speaker="Daisy Studious",
             language="de",
         )
 
         audio = AudioSegment.from_wav(tmp_wav.name)
+        if i > 1:
+            combined += AudioSegment.silent(duration=SILENCE_BETWEEN_CHUNKS)
         combined += audio
-        combined += AudioSegment.silent(duration=200)  # kleine Pause zwischen Chunks
+
+    combined = effects.normalize(combined, headroom=3.0)
 
     combined.export(out_path, format="wav")
 
@@ -98,7 +154,7 @@ def split_by_h2_sections(md_text: str):
     ## Kapitel 1
     ### Unterkapitel
     ...
-    und gibt eine Liste (kapitel_titel, kapitel_text) zurück.
+    und gibt eine Liste (kapitel_titel, kapitel_text) zurueck.
     """
     lines = md_text.splitlines()
 
@@ -108,26 +164,21 @@ def split_by_h2_sections(md_text: str):
     current_lines = []
 
     for line in lines:
-        # Haupttitel (# ...) nur einmal ganz oben mitnehmen, aber kein eigenes Kapitel
         if line.startswith("# ") and not line.startswith("##"):
             if main_title is None:
                 main_title = line.lstrip("#").strip()
             continue
 
-        # Kapitel: genau "## " am Zeilenanfang
         if line.startswith("## "):
-            # altes Kapitel abschließen
             if current_title is not None and current_lines:
                 sections.append((current_title, "\n".join(current_lines).strip()))
                 current_lines = []
-            current_title = line.lstrip("#").strip()  # "## " entfernen
+            current_title = line.lstrip("#").strip()
 
         else:
-            # alles (inkl. ### usw.) gehört zum aktuellen Kapitel
             if current_title is not None:
                 current_lines.append(line)
 
-    # letztes Kapitel
     if current_title is not None and current_lines:
         sections.append((current_title, "\n".join(current_lines).strip()))
 
@@ -157,7 +208,7 @@ def synthesize_chapters(md_path: Path, out_dir: Path):
         print(f"[*] Synthese Kapitel {idx}: {title}")
         synthesize_chapter(content, out_path)
         wav_paths.append(out_path)
-        # exit(0)  # Debug: Nur ein Kapitel testen
+        exit(0)  # Debug: Nur ein Kapitel testen
 
     return wav_paths
 
