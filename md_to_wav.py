@@ -16,7 +16,7 @@ from pysbd import Segmenter
 import tempfile
 
 
-INPUT_MD = Path("data/Deep Learning – Vollständiger Vortrag auf M.Sc.-Niveau.md")
+INPUT_MD = Path("data/Shortcut Learning in Deep Neural Networks.md")
 OUT_DIR = Path("audio_kapitel")
 OUT_DIR.mkdir(exist_ok=True)
 
@@ -26,10 +26,11 @@ MODEL_NAME = "tts_models/multilingual/multi-dataset/xtts_v2"
 tts = TTS(MODEL_NAME)
 tts.to("cuda")
 
-MAX_CHARS = 800
+MAX_CHARS = 250
 
 SILENCE_BETWEEN_CHUNKS = 200  # ms pause between chunks
 SPEAKER_WAV = Path("data/christian-brueckner.wav") # Optional: Path to a speaker reference audio file
+AUTHOR = "Perplexity AI"
 
 _segmenter = Segmenter(language="de", clean=True)
 
@@ -120,7 +121,18 @@ def normalize_text(text: str) -> str:
     text = re.sub(r' +', ' ', text)
     return text.strip()
 
-def synthesize_chapter(content: str, out_path):
+def synthesize_text(text: str) -> AudioSegment:
+    tmp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp_wav.close()
+    tts.tts_to_file(
+        text=text,
+        file_path=tmp_wav.name,
+        speaker_wav=str(SPEAKER_WAV) if SPEAKER_WAV else None,
+        language="de",
+    )
+    return AudioSegment.from_wav(tmp_wav.name)
+
+def synthesize_chapter(content: str, out_path, prepend=None, append=None):
     content = strip_markdown(content)
     content = normalize_text(content)
     chunks = text_to_chunks(content, MAX_CHARS)
@@ -142,6 +154,11 @@ def synthesize_chapter(content: str, out_path):
         if i > 1:
             combined += AudioSegment.silent(duration=SILENCE_BETWEEN_CHUNKS)
         combined += audio
+
+    if prepend is not None:
+        combined = prepend + AudioSegment.silent(duration=SILENCE_BETWEEN_CHUNKS) + combined
+    if append is not None:
+        combined = combined + AudioSegment.silent(duration=SILENCE_BETWEEN_CHUNKS) + append
 
     combined = effects.normalize(combined, headroom=3.0)
 
@@ -199,7 +216,18 @@ def synthesize_chapters(md_path: Path, out_dir: Path):
     main_title, sections = split_by_h2_sections(text)
 
     print(f"Haupttitel: {main_title}")
+
+    intro = None
+    outro = None
+    if main_title:
+        print("[*] Synthese Intro")
+        title_audio = synthesize_text(main_title)
+        intro = title_audio + AudioSegment.silent(duration=2000)
+        outro_text = f"Sie hörten: {main_title}, geschrieben von {AUTHOR}"
+        outro = AudioSegment.silent(duration=2000) + synthesize_text(outro_text)
+
     wav_paths = []
+    total = len(sections)
 
     for idx, (title, content) in enumerate(sections, start=1):
         if not content.strip():
@@ -209,9 +237,11 @@ def synthesize_chapters(md_path: Path, out_dir: Path):
         out_path = out_dir / filename
 
         print(f"[*] Synthese Kapitel {idx}: {title}")
-        synthesize_chapter(content, out_path)
+        prepend = intro if idx == 1 else None
+        append = outro if idx == total else None
+        synthesize_chapter(content, out_path, prepend=prepend, append=append)
         wav_paths.append(out_path)
-        exit(0)  # Debug: Nur ein Kapitel testen
+        # exit(0)  # Debug: Nur ein Kapitel testen
 
     return wav_paths
 
