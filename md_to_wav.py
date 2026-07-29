@@ -121,7 +121,16 @@ def normalize_text(text: str) -> str:
     text = re.sub(r' +', ' ', text)
     return text.strip()
 
+def expand_abbreviations(text: str) -> str:
+    text = re.sub(
+        r'\b([A-Z]{2,5})(s)?(?=\s|[.,!?;:)\]})]|-\d|$)',
+        lambda m: ' '.join(m.group(1)) + (f' {m.group(2)}' if m.group(2) else ''),
+        text,
+    )
+    return text
+
 def synthesize_text(text: str) -> AudioSegment:
+    text = expand_abbreviations(text)
     tmp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp_wav.close()
     tts.tts_to_file(
@@ -135,6 +144,7 @@ def synthesize_text(text: str) -> AudioSegment:
 def synthesize_chapter(content: str, out_path, prepend=None, append=None):
     content = strip_markdown(content)
     content = normalize_text(content)
+    content = expand_abbreviations(content)
     chunks = text_to_chunks(content, MAX_CHARS)
     combined = AudioSegment.silent(duration=0)
 
